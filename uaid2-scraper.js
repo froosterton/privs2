@@ -4,52 +4,52 @@ const axios = require('axios');
 const express = require('express');
 const { Client } = require('discord.js-selfbot-v13');
 
-// Configuration - Environment variables for Railway
-const WEBHOOK_URL = process.env.WEBHOOK_URL || 'https://discord.com/api/webhooks/1424544927215259774/CIwNwKw8SSM2LIxubgMoZjGioui_3Qmoz6h9VGSTqvZL_1eRcQ-hFmaQc_KuvabCToIo';
-const USERNAME_WEBHOOK_URL = process.env.USERNAME_WEBHOOK_URL || 'https://discord.com/api/webhooks/1424544927215259774/CIwNwKw8SSM2LIxubgMoZjGioui_3Qmoz6h9VGSTqvZL_1eRcQ-hFmaQc_KuvabCToIo';
-const ITEM_IDS = process.env.ITEM_IDS || '1016143686,4390891467';
-const NEXUS_ADMIN_KEY = process.env.NEXUS_ADMIN_KEY;
+// Configuration - Railway deployment ready
+const WEBHOOK_URL = process.env.WEBHOOK_URL;
+const USERNAME_WEBHOOK_URL = process.env.USERNAME_WEBHOOK_URL;
+const ITEM_IDS = process.env.ITEM_IDS || '1016143686,4390891467'; // Comma-separated item IDs
+const NEXUS_ACCESS_KEY = process.env.NEXUS_ACCESS_KEY;
 const NEXUS_API_URL = 'https://discord.nexusdevtools.com/lookup/roblox';
 
-// Discord bot configuration
+// Discord API configuration (for reading back messages)
 const USER_TOKEN = process.env.USER_TOKEN;
-const COMMAND_CHANNEL_ID = process.env.COMMAND_CHANNEL_ID || '1465283527166922802';
-const MONITOR_CHANNEL_ID = process.env.MONITOR_CHANNEL_ID || '1465281410821656618';
+const GUILD_ID = process.env.GUILD_ID || '1423783454297817162';
+const COMMAND_CHANNEL_ID = process.env.COMMAND_CHANNEL_ID || '1462274235958562827'; // Channel where commands are sent
+const MONITOR_CHANNEL_ID = process.env.MONITOR_CHANNEL_ID || '1462245649834577952'; // Channel where webhook messages with usernames are sent
 
-// Speed settings
-const PAGE_LOAD_WAIT = 2000;
-const TABLE_WAIT = 1500;
-const PROFILE_CHECK_WAIT = 2000;
-const BETWEEN_CHECKS_WAIT = 500;
-const PAGES_PER_BATCH = 10;
-
-let driver;
-let processedUAIDs = new Set();
-let totalFound = 0;
-let isScraping = false;
-
-// Express server for Railway health check
+// Express server for healthcheck
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+let driver; // Global Selenium WebDriver instance
+let profileDriver; // Dedicated driver for profile scraping
+let processedUsers = new Set();
+let totalLogged = 0;
+let isScraping = false;
+let retryCount = 0;
+const MAX_RETRIES = 3;
+
+// Healthcheck endpoint
 app.get('/', (req, res) => {
-    res.json({
-        status: 'healthy',
+    res.json({ 
+        status: 'healthy', 
         scraping: isScraping,
-        totalFound: totalFound,
-        processedUAIDs: processedUAIDs.size,
+        totalLogged: totalLogged,
         timestamp: new Date().toISOString()
     });
 });
 
+// Start Express server
 app.listen(PORT, () => {
-    console.log(`🌐 Health check server running on port ${PORT}`);
+    console.log(`🌐 Healthcheck server running on port ${PORT}`);
 });
 
-// Initialize Discord client for commands
+// Initialize Discord client (if token is provided)
 let discordClient = null;
 if (USER_TOKEN) {
-    discordClient = new Client({ checkUpdate: false });
+    discordClient = new Client({
+        checkUpdate: false
+    });
 
     discordClient.on('ready', () => {
         console.log(`✅ Discord bot logged in as ${discordClient.user.tag}`);
@@ -59,8 +59,14 @@ if (USER_TOKEN) {
 
     discordClient.on('messageCreate', async (message) => {
         // Only listen to commands from the command channel
-        if (message.channel.id !== COMMAND_CHANNEL_ID) return;
-        if (!message.content.startsWith('!')) return;
+        if (message.channel.id !== COMMAND_CHANNEL_ID) {
+            return;
+        }
+        
+        // Only respond to commands starting with !
+        if (!message.content.startsWith('!')) {
+            return;
+        }
         
         const command = message.content.trim();
         
@@ -107,6 +113,7 @@ if (USER_TOKEN) {
                     await message.reply(`❌ Could not find message with username: ${startUsername}`);
                     return;
                 }
+                
                 if (!endMessageId) {
                     await message.reply(`❌ Could not find message with username: ${endUsername}`);
                     return;
@@ -176,6 +183,7 @@ if (USER_TOKEN) {
                     await message.reply(`❌ Could not find message with username: ${startUsername}`);
                     return;
                 }
+                
                 if (!endMessageId) {
                     await message.reply(`❌ Could not find message with username: ${endUsername}`);
                     return;
@@ -206,6 +214,33 @@ if (USER_TOKEN) {
     discordClient.on('error', (e) => console.error('❌ Discord client error:', e));
 } else {
     console.log('ℹ️ USER_TOKEN not set. Discord bot functionality disabled.');
+    console.log('💡 Set USER_TOKEN environment variable to enable Discord command features.');
+}
+
+// Extract Discord username from webhook embed or plain text message
+function extractDiscordUsername(message) {
+    if (message.webhookId) {
+        if (message.embeds && message.embeds.length > 0) {
+            for (const embed of message.embeds) {
+                if (embed.fields) {
+                    for (const field of embed.fields) {
+                        if (field.name === 'Discord Username' && field.value) {
+                            return field.value.trim();
+                        }
+                    }
+                }
+            }
+        }
+        
+        if (message.content && message.content.trim()) {
+            const content = message.content.trim();
+            if (!content.includes(' ') && content.length > 0) {
+                return content;
+            }
+        }
+    }
+    
+    return null;
 }
 
 // Fetch all messages from channel using Discord API
@@ -214,9 +249,10 @@ async function fetchAllMessages(channelId, startMessageId = null, endMessageId =
     let lastMessageId = startMessageId || null;
     let foundStartMessage = !startMessageId;
     let foundEndMessage = false;
+    const botToken = USER_TOKEN;
     
-    if (!USER_TOKEN) {
-        console.error('❌ USER_TOKEN not set, cannot fetch messages');
+    if (!botToken) {
+        console.error('❌ USER_TOKEN not set, cannot fetch messages from Discord API');
         return [];
     }
     
@@ -226,15 +262,23 @@ async function fetchAllMessages(channelId, startMessageId = null, endMessageId =
         try {
             const url = `https://discord.com/api/v10/channels/${channelId}/messages`;
             const params = { limit: 100 };
-            if (lastMessageId) params.before = lastMessageId;
+            if (lastMessageId) {
+                params.before = lastMessageId;
+            }
             
             const response = await axios.get(url, {
-                headers: { 'Authorization': USER_TOKEN, 'Content-Type': 'application/json' },
+                headers: {
+                    'Authorization': botToken,
+                    'Content-Type': 'application/json'
+                },
                 params: params
             });
             
             const messages = response.data;
-            if (!messages || messages.length === 0) break;
+            
+            if (!messages || messages.length === 0) {
+                break;
+            }
             
             for (const msg of messages) {
                 if (endMessageId && msg.id === endMessageId) {
@@ -243,13 +287,15 @@ async function fetchAllMessages(channelId, startMessageId = null, endMessageId =
                 }
                 
                 if (startMessageId && !foundStartMessage) {
-                    if (msg.id === startMessageId) foundStartMessage = true;
-                    else continue;
+                    if (msg.id === startMessageId) {
+                        foundStartMessage = true;
+                    } else {
+                        continue;
+                    }
                 }
                 
                 if (foundStartMessage && !foundEndMessage) {
                     if (msg.webhook_id) {
-                        // Check embeds
                         if (msg.embeds && msg.embeds.length > 0) {
                             for (const embed of msg.embeds) {
                                 if (embed.fields) {
@@ -264,23 +310,37 @@ async function fetchAllMessages(channelId, startMessageId = null, endMessageId =
                                 }
                             }
                         }
-                        // Check plain content
+                        
                         if (msg.content && msg.content.trim()) {
                             const content = msg.content.trim();
-                            if (!content.includes(' ') && content.length > 0 && !usernames.includes(content)) {
-                                usernames.push(content);
+                            if (!content.includes(' ') && content.length > 0) {
+                                if (!usernames.includes(content)) {
+                                    usernames.push(content);
+                                }
                             }
                         }
                     }
                 }
+                
                 lastMessageId = msg.id;
             }
             
-            if (foundEndMessage || messages.length < 100) break;
+            if (foundEndMessage) {
+                break;
+            }
+            
+            if (messages.length < 100) {
+                break;
+            }
+            
             await new Promise(resolve => setTimeout(resolve, 500));
             
         } catch (error) {
             console.error('❌ Error fetching messages:', error.message);
+            if (error.response) {
+                console.error('Response status:', error.response.status);
+                console.error('Response data:', error.response.data);
+            }
             break;
         }
     }
@@ -288,26 +348,40 @@ async function fetchAllMessages(channelId, startMessageId = null, endMessageId =
     return usernames.reverse();
 }
 
-// Find message ID by username
+// Find message ID by username in message content
 async function findMessageIdByUsername(channelId, username) {
-    if (!USER_TOKEN) return null;
+    const botToken = USER_TOKEN;
+    
+    if (!botToken) {
+        console.error('❌ USER_TOKEN not set, cannot search for messages');
+        return null;
+    }
     
     let lastMessageId = null;
+    
     console.log(`🔍 Searching for message with username: ${username}`);
     
     while (true) {
         try {
             const url = `https://discord.com/api/v10/channels/${channelId}/messages`;
             const params = { limit: 100 };
-            if (lastMessageId) params.before = lastMessageId;
+            if (lastMessageId) {
+                params.before = lastMessageId;
+            }
             
             const response = await axios.get(url, {
-                headers: { 'Authorization': USER_TOKEN, 'Content-Type': 'application/json' },
+                headers: {
+                    'Authorization': botToken,
+                    'Content-Type': 'application/json'
+                },
                 params: params
             });
             
             const messages = response.data;
-            if (!messages || messages.length === 0) break;
+            
+            if (!messages || messages.length === 0) {
+                break;
+            }
             
             for (const msg of messages) {
                 if (msg.webhook_id) {
@@ -322,14 +396,19 @@ async function findMessageIdByUsername(channelId, username) {
                             }
                         }
                     }
+                    
                     if (msg.content && msg.content.trim() === username) {
                         return msg.id;
                     }
                 }
+                
                 lastMessageId = msg.id;
             }
             
-            if (messages.length < 100) break;
+            if (messages.length < 100) {
+                break;
+            }
+            
             await new Promise(resolve => setTimeout(resolve, 500));
             
         } catch (error) {
@@ -341,27 +420,75 @@ async function findMessageIdByUsername(channelId, username) {
     return null;
 }
 
+async function startScraper() {
+    console.log('🔐 Initializing scraper...');
+    const initialized = await initializeWebDriver();
+    if (!initialized) {
+        console.error('❌ Failed to initialize WebDriver, exiting.');
+        process.exit(1);
+    }
+
+    console.log('🚀 Starting Rolimons scraper...');
+    isScraping = true;
+    const itemIds = ITEM_IDS.split(',').map(id => id.trim()).filter(id => id && !isNaN(id));
+    if (itemIds.length > 0) {
+        console.log('⚙️ Starting scrape for items:', itemIds.join(', '));
+        for (const itemId of itemIds) {
+            await scrapeRolimonsItem(itemId);
+        }
+        console.log("✅ All items scraped, script finished.");
+        isScraping = false;
+    } else {
+        console.log('❌ No valid item IDs found in environment variables');
+        process.exit(1);
+    }
+}
+
 async function initializeWebDriver() {
     try {
         console.log('🔧 Initializing Selenium WebDriver...');
 
         const options = new chrome.Options();
-        options.addArguments('--headless=new');
+        options.addArguments('--headless');
         options.addArguments('--no-sandbox');
         options.addArguments('--disable-dev-shm-usage');
         options.addArguments('--disable-gpu');
         options.addArguments('--window-size=1920,1080');
         options.addArguments('--disable-web-security');
         options.addArguments('--disable-features=VizDisplayCompositor');
+        options.addArguments('--disable-extensions');
+        options.addArguments('--disable-plugins');
+        options.addArguments('--disable-images');
         options.addArguments('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         options.addArguments('--disable-blink-features=AutomationControlled');
+        options.addArguments('--exclude-switches=enable-automation');
 
         driver = await new Builder()
             .forBrowser('chrome')
             .setChromeOptions(options)
             .build();
 
-        console.log('✅ Selenium WebDriver initialized');
+        const profileOptions = new chrome.Options();
+        profileOptions.addArguments('--headless');
+        profileOptions.addArguments('--no-sandbox');
+        profileOptions.addArguments('--disable-dev-shm-usage');
+        profileOptions.addArguments('--disable-gpu');
+        profileOptions.addArguments('--window-size=1920,1080');
+        profileOptions.addArguments('--disable-web-security');
+        profileOptions.addArguments('--disable-features=VizDisplayCompositor');
+        profileOptions.addArguments('--disable-extensions');
+        profileOptions.addArguments('--disable-plugins');
+        profileOptions.addArguments('--disable-images');
+        profileOptions.addArguments('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        profileOptions.addArguments('--disable-blink-features=AutomationControlled');
+        profileOptions.addArguments('--exclude-switches=enable-automation');
+
+        profileDriver = await new Builder()
+            .forBrowser('chrome')
+            .setChromeOptions(profileOptions)
+            .build();
+
+        console.log('✅ Selenium WebDriver initialized successfully');
         return true;
     } catch (error) {
         console.error('❌ WebDriver initialization error:', error.message);
@@ -369,529 +496,707 @@ async function initializeWebDriver() {
     }
 }
 
+async function scrapeRolimonsItem(itemId) {
+    try {
+        const url = `https://www.rolimons.com/item/${itemId}`;
+        console.log(`🔍 Getting item information from ${url}`);
+        
+        await driver.get(url);
+        await driver.sleep(5000);
+
+        await driver.executeScript('window.scrollTo(0, 0);');
+        await driver.sleep(1000);
+        
+        try {
+            console.log('📋 Clicking "All Copies" tab...');
+            
+            let tabClicked = false;
+            const allCopiesTab = await driver.findElement(By.css('a[href="#all_copies_table_container"]'));
+            const className = await allCopiesTab.getAttribute('class');
+            
+            if (!className.includes('active')) {
+                try {
+                    await driver.executeScript('arguments[0].click();', allCopiesTab);
+                    console.log('✅ Successfully clicked "All Copies" tab (JS click)');
+                    tabClicked = true;
+                } catch (e1) {
+                    console.log('⚠️ JS click failed, trying scroll then click...');
+                    try {
+                        await driver.executeScript('arguments[0].scrollIntoView({behavior: "smooth", block: "center"});', allCopiesTab);
+                        await driver.sleep(1000);
+                        await allCopiesTab.click();
+                        console.log('✅ Successfully clicked "All Copies" tab (scroll + click)');
+                        tabClicked = true;
+                    } catch (e2) {
+                        console.log('⚠️ Scroll click failed, trying force JS click...');
+                        try {
+                            await driver.executeScript(`
+                                var element = arguments[0];
+                                element.style.zIndex = '9999';
+                                element.click();
+                            `, allCopiesTab);
+                            console.log('✅ Successfully clicked "All Copies" tab (force JS)');
+                            tabClicked = true;
+                        } catch (e3) {
+                            console.log('⚠️ All click methods failed, attempting to wait and retry...');
+                            await driver.sleep(3000);
+                            await driver.executeScript('arguments[0].click();', allCopiesTab);
+                            tabClicked = true;
+                        }
+                    }
+                }
+            } else {
+                console.log('✅ "All Copies" tab already active');
+                tabClicked = true;
+            }
+            
+            if (tabClicked) {
+                await driver.sleep(2000);
+                
+                console.log('⏳ Waiting for All Copies table to load...');
+                try {
+                    await driver.wait(until.elementLocated(By.css('#all_copies_table tbody tr')), 20000);
+                    await driver.sleep(3000);
+                    
+                    const rows = await driver.findElements(By.css('#all_copies_table tbody tr'));
+                    console.log(`✅ All Copies table loaded with ${rows.length} rows visible`);
+                } catch (tableError) {
+                    console.log('⚠️ Table not found yet, trying to refresh tab click...');
+                    try {
+                        await driver.executeScript('arguments[0].click();', allCopiesTab);
+                        await driver.sleep(3000);
+                        await driver.wait(until.elementLocated(By.css('#all_copies_table tbody tr')), 20000);
+                        const rows = await driver.findElements(By.css('#all_copies_table tbody tr'));
+                        console.log(`✅ All Copies table loaded after retry with ${rows.length} rows visible`);
+                    } catch (retryError) {
+                        console.log('⚠️ Table still not found after retry:', retryError.message);
+                        throw new Error('Failed to load All Copies table after multiple attempts');
+                    }
+                }
+            }
+        } catch (e) {
+            console.log('⚠️ Could not find/click "All Copies" tab or table not ready:', e.message);
+            try {
+                console.log('🔄 Attempting final retry to load All Copies table...');
+                await driver.sleep(3000);
+                const finalTab = await driver.findElement(By.css('a[href="#all_copies_table_container"]'));
+                await driver.executeScript('arguments[0].click();', finalTab);
+                await driver.sleep(5000);
+                await driver.wait(until.elementLocated(By.css('#all_copies_table')), 15000);
+                console.log('✅ All Copies table found on final retry');
+            } catch (finalError) {
+                console.log('❌ Could not load All Copies table after all attempts:', finalError.message);
+                throw finalError;
+            }
+        }
+
+        let itemName = 'Unknown Item';
+        try {
+            const titleElement = await driver.findElement(By.css('h1.page_title.mb-0'));
+            itemName = await titleElement.getText();
+            console.log(`📦 Scraping ${itemName}`);
+        } catch (e) {
+            console.log('⚠️ Could not extract item name, using default');
+        }
+
+        await driver.sleep(2000);
+        
+        try {
+            await driver.wait(until.elementLocated(By.css('#all_copies_table')), 15000);
+            console.log('✅ All Copies table container found');
+        } catch (e) {
+            console.log('❌ All Copies table container not found, cannot proceed');
+            throw new Error('All Copies table failed to load');
+        }
+        
+        let totalPages = 1;
+        
+        try {
+            console.log('🔍 Looking for pagination...');
+            await driver.wait(until.elementLocated(By.css('#all_copies_table_paginate')), 15000);
+
+            const pageButtons = await driver.findElements(By.css('#all_copies_table_paginate a.page-link[data-dt-idx]'));
+            let lastPageButton = null;
+
+            for (const button of pageButtons) {
+                const text = (await button.getText()).trim();
+                if (/^\d+$/.test(text)) {
+                    const pageNum = parseInt(text, 10);
+                    if (!isNaN(pageNum) && pageNum > totalPages) {
+                        totalPages = pageNum;
+                        lastPageButton = button;
+                    }
+                }
+            }
+
+            if (lastPageButton && totalPages > 1) {
+                console.log(`📄 Highest page number found: ${totalPages}. Clicking it to go to last page...`);
+                try {
+                    await lastPageButton.click();
+                    console.log('✅ Regular click succeeded');
+                } catch (e) {
+                    console.log(`⚠️ Regular click failed: ${e.message}, trying JS click...`);
+                    await driver.executeScript('arguments[0].click();', lastPageButton);
+                    console.log('✅ JS click succeeded');
+                }
+                await driver.sleep(5000);
+            } else {
+                console.log('⚠️ Could not find a numeric last page button, assuming single page');
+            }
+        } catch (e) {
+            console.log('⚠️ Error finding pagination:', e.message);
+        }
+
+        console.log(`🔄 Starting continuous scraping from page ${totalPages} (last page) going backwards using Prev...`);
+
+        for (let page = totalPages; page >= 1; page--) {
+            console.log(`\n📄 Processing page ${page}/${totalPages}`);
+            if (page !== totalPages) {
+                try {
+                    const prevLink = await driver.findElement(By.css('#all_copies_table_paginate a.page-link[data-dt-idx="0"]'));
+                    const prevParent = await prevLink.findElement(By.xpath('..'));
+                    const cls = ((await prevParent.getAttribute('class')) || '').toLowerCase();
+
+                    if (cls.includes('disabled')) {
+                        console.log('⏹️ Prev button is disabled; reached the first page.');
+                        break;
+                    }
+
+                    console.log('⬅️ Clicking Prev to move to previous page...');
+                    try {
+                        await prevLink.click();
+                        console.log('✅ Prev regular click succeeded');
+                    } catch (e) {
+                        console.log(`⚠️ Prev regular click failed: ${e.message}, trying JS click...`);
+                        await driver.executeScript('arguments[0].click();', prevLink);
+                        console.log('✅ Prev JS click succeeded');
+                    }
+                    await driver.sleep(5000);
+                } catch (e) {
+                    console.log(`❌ Could not click Prev for page ${page}: ${e.message}`);
+                    break;
+                }
+            }
+
+            let infoText = '';
+            try {
+                infoText = await driver.findElement(By.css('#all_copies_table_info')).getText();
+                console.log(`📊 DataTables info for current page: "${infoText}"`);
+            } catch (e) {
+                console.log('⚠️ Could not read all_copies_table_info:', e.message);
+            }
+            
+            try {
+                const sampleRows = await driver.findElements(By.css('#all_copies_table tbody tr'));
+                if (sampleRows.length > 0) {
+                    const firstRow = sampleRows[0];
+                    const sampleLink = await firstRow.findElement(By.css('a[href*="/player/"]'));
+                    const sampleUsername = await sampleLink.getText();
+                    console.log(`🔍 Sample user on this page (first row): "${sampleUsername}"`);
+                }
+            } catch (e) {
+                console.log('⚠️ Could not read sample user from table:', e.message);
+            }
+
+            let rows = [];
+            try {
+                await driver.wait(until.elementLocated(By.css('#all_copies_table tbody tr')), 15000);
+                rows = await driver.findElements(By.css('#all_copies_table tbody tr'));
+                console.log(`✅ Found ${rows.length} rows with selector: #all_copies_table tbody tr`);
+            } catch (e) {
+                console.log(`❌ Could not find rows: ${e.message}`);
+                continue;
+            }
+            
+            if (rows.length === 0) {
+                console.log(`❌ No users found on page ${page}, skipping...`);
+                continue;
+            }
+            console.log(`👥 Found ${rows.length} users on page ${page}`);
+            console.log(`🔄 Processing users from bottom to top (reverse order)...`);
+
+            for (let i = rows.length - 1; i >= 0; i--) {
+                try {
+                    const currentRows = await driver.findElements(By.css('#all_copies_table tbody tr'));
+                    if (i >= currentRows.length) {
+                        console.log(`⏭️ Row ${i} no longer exists, skipping...`);
+                        continue;
+                    }
+                    const row = currentRows[i];
+
+                    const link = await row.findElement(By.css('a[href*="/player/"]'));
+
+                    let username = (await link.getText()) || '';
+                    username = username.trim();
+
+                    if (!username) {
+                        try {
+                            username = ((await link.getAttribute('textContent')) || '').trim();
+                        } catch (_) {
+                            // ignore
+                        }
+                    }
+
+                    let profileUrl = (await link.getAttribute('href')) || '';
+                    if (profileUrl && !profileUrl.startsWith('http')) {
+                        profileUrl = `https://www.rolimons.com${profileUrl}`;
+                    }
+
+                    if (!username) {
+                        console.log(`⚠️ Username text empty for row ${i} (from bottom), proceeding with profile link: ${profileUrl}`);
+                        if (profileUrl) {
+                            const parts = profileUrl.split('/').filter(Boolean);
+                            username = parts[parts.length - 1] || 'Unknown';
+                        } else {
+                            username = 'Unknown';
+                        }
+                    }
+                    if (processedUsers.has(username)) {
+                        console.log(`⏭️ Skipping already processed user: ${username}`);
+                        await new Promise(res => setTimeout(res, 6000));
+                        continue;
+                    }
+
+                    console.log(`🔍 Checking user ${rows.length - i}/${rows.length} (row ${i} from bottom): ${username}`);
+                    const rolimons = await scrapeRolimonsUserProfile(profileUrl);
+                    rolimons.profileUrl = profileUrl;
+
+                    if (rolimons.tradeAds > 500) {
+                        console.log(`❌ Too many trade ads (${rolimons.tradeAds}), skipping ${username}`);
+                        processedUsers.add(username);
+                        await new Promise(res => setTimeout(res, 6000));
+                        continue;
+                    }
+                    if (rolimons.value >= 100000000) {
+                        console.log(`❌ Value too high (${rolimons.value}), skipping ${username}`);
+                        processedUsers.add(username);
+                        await new Promise(res => setTimeout(res, 6000));
+                        continue;
+                    }
+
+                    console.log(`🔍 Processing user: ${username}`);
+                    const hit = await lookupDiscordAndSend(username, rolimons);
+
+                    await new Promise(res => setTimeout(res, 10000));
+                    processedUsers.add(username);
+                    if (hit) {
+                        totalLogged++;
+                    }
+
+                } catch (error) {
+                    console.error(`❌ Error processing row ${i} (from bottom):`, error.message);
+                    if (error.message.includes('failed to start a thread') || error.message.includes('SIGTRAP')) {
+                        console.log('🔄 Critical error detected, attempting recovery...');
+                        await new Promise(res => setTimeout(res, 10000));
+                        
+                        try {
+                            if (driver) {
+                                await driver.quit();
+                            }
+                            if (profileDriver) {
+                                await profileDriver.quit();
+                            }
+                        } catch (e) {
+                            console.log('Error closing broken drivers:', e.message);
+                        }
+                        
+                        await initializeWebDriver();
+                        
+                        processedUsers.add(username || `unknown_${i}`);
+                        continue;
+                    }
+                }
+            }
+            console.log(`✅ Finished page ${page}/${totalPages}`);
+        }
+        console.log(`✅ All users processed for item ${itemId}. Total valid hits so far: ${totalLogged}`);
+        isScraping = false;
+    } catch (error) {
+        console.error('❌ Error during scraping:', error.message);
+        
+        if (retryCount < MAX_RETRIES) {
+            retryCount++;
+            console.log(`🔄 Restarting scrape in 10 seconds... (attempt ${retryCount}/${MAX_RETRIES})`);
+            
+            try {
+                if (driver) await driver.quit();
+                if (profileDriver) await profileDriver.quit();
+            } catch (e) {
+                console.log('Error closing drivers during restart:', e.message);
+            }
+            
+            await initializeWebDriver();
+            setTimeout(() => scrapeRolimonsItem(itemId), 10000);
+        } else {
+            console.log('❌ Max retries reached, giving up on this item');
+            retryCount = 0;
+        }
+    }
+}
+
+function parseLastOnlineDays(text) {
+    text = text.toLowerCase();
+    if (
+        text.includes('second') ||
+        text.includes('minute') ||
+        text.includes('hour') ||
+        text.includes('just now')
+    ) {
+        return 0;
+    }
+    const match = text.match(/(\d+)\s*day/);
+    if (match) {
+        return parseInt(match[1]);
+    }
+    return 999;
+}
+
+async function scrapeRolimonsUserProfile(profileUrl, retryAttempt = 0) {
+    if (!profileDriver) {
+        console.error('❌ Profile driver not initialized');
+        return {
+            tradeAds: 0,
+            rap: 0,
+            value: 0,
+            avatarUrl: '',
+            lastOnlineText: 'Unknown',
+            lastOnlineDays: 999
+        };
+    }
+
+    try {
+        await profileDriver.get(profileUrl);
+        await profileDriver.sleep(2000);
+
+        const getText = async (selector) => {
+            try {
+                const element = await profileDriver.findElement(By.css(selector));
+                return await element.getText();
+            } catch {
+                return '';
+            }
+        };
+
+        let tradeAds = 0;
+        try {
+            try {
+                const tradeAdsElement = await profileDriver.findElement(By.css('span.card-title.mb-1.text-light.stat-data.text-nowrap'));
+                const text = await tradeAdsElement.getText();
+                if (text && !isNaN(text.replace(/,/g, ''))) {
+                    tradeAds = parseInt(text.replace(/,/g, '')) || 0;
+                    console.log(`✅ Found trade ads with exact selector: ${tradeAds}`);
+                }
+            } catch (e) {
+                console.log('⚠️ Exact selector failed, trying contextual search...');
+            }
+            if (tradeAds === 0) {
+                try {
+                    const contextElements = await profileDriver.findElements(By.xpath("//*[contains(text(), 'Trade Ads') and contains(text(), 'Created')]/following::*[contains(@class, 'stat-data')][1] | //*[contains(text(), 'Trade Ads') and contains(text(), 'Created')]/..//*[contains(@class, 'stat-data')]"));
+                    if (contextElements.length > 0) {
+                        const text = await contextElements[0].getText();
+                        if (text && !isNaN(text.replace(/,/g, ''))) {
+                            tradeAds = parseInt(text.replace(/,/g, '')) || 0;
+                            console.log(`✅ Found trade ads via "Trade Ads Created" context: ${tradeAds}`);
+                        }
+                    }
+                } catch (e) {
+                    console.log('⚠️ Contextual search failed, trying alternative selectors...');
+                }
+            }
+            if (tradeAds === 0) {
+                const selectors = [
+                    '.card-title.mb-1.text-light.stat-data.text-nowrap',
+                    'span.stat-data.text-nowrap',
+                    '.stat-data.text-nowrap',
+                    '.card-title.stat-data'
+                ];
+                for (const selector of selectors) {
+                    try {
+                        const elements = await profileDriver.findElements(By.css(selector));
+                        for (const element of elements) {
+                            const text = await element.getText();
+                            if (text && /^\d{1,3}(,\d{3})*$/.test(text)) {
+                                const numValue = parseInt(text.replace(/,/g, ''));
+                                if (numValue > 0 && numValue <= 50000) {
+                                    tradeAds = numValue;
+                                    console.log(`✅ Found trade ads: ${tradeAds} using selector: ${selector}`);
+                                    break;
+                                }
+                            }
+                        }
+                        if (tradeAds > 0) break;
+                    } catch (e) { continue; }
+                }
+            }
+            if (tradeAds === 0) {
+                console.log('⚠️ Could not find trade ads with any method');
+            }
+        } catch (e) {
+            console.log('⚠️ Error finding trade ads:', e.message);
+        }
+        const rap = parseInt((await getText('#player_rap')).replace(/,/g, '')) || 0;
+        const value = parseInt((await getText('#player_value')).replace(/,/g, '')) || 0;
+        const lastOnlineText = await getText('#location_pane_last_seen_online');
+
+        let lastOnlineDays = parseLastOnlineDays(lastOnlineText);
+
+        let avatarUrl = '';
+        try {
+            const avatarImg = await profileDriver.findElement(By.css('img.mx-auto.d-block.w-100.h-100[src^="https://tr.rbxcdn.com/"]'));
+            avatarUrl = await avatarImg.getAttribute('src');
+            if (avatarUrl) {
+                console.log(`✅ Found avatar URL: ${avatarUrl.substring(0, 60)}...`);
+            }
+        } catch (e) {
+            console.log('⚠️ Could not find avatar image:', e.message);
+        }
+
+        return {
+            tradeAds,
+            rap,
+            value,
+            avatarUrl,
+            lastOnlineText,
+            lastOnlineDays
+        };
+    } catch (error) {
+        console.error('❌ Failed to scrape profile:', error.message);
+        
+        if (retryAttempt < MAX_RETRIES && (error.message.includes('failed to start a thread') || error.message.includes('SIGTRAP'))) {
+            console.log(`🔄 Retrying profile scrape (attempt ${retryAttempt + 1}/${MAX_RETRIES})...`);
+            await new Promise(res => setTimeout(res, 5000));
+            return await scrapeRolimonsUserProfile(profileUrl, retryAttempt + 1);
+        }
+        
+        return {
+            tradeAds: 0,
+            rap: 0,
+            value: 0,
+            avatarUrl: '',
+            lastOnlineText: 'Unknown',
+            lastOnlineDays: 999
+        };
+    }
+}
+
 function extractDiscordFromRecord(record) {
     if (!record || typeof record !== 'object') return null;
-    
-    // Prefer explicit fields if present
+
     if (record.discord_tag) return String(record.discord_tag);
     if (record.discord_username && record.discriminator) {
         return `${record.discord_username}#${record.discriminator}`;
     }
     if (record.discord_username) return String(record.discord_username);
-    
-    // Nexus /lookup/roblox returns objects like: { "username": "<discord username>", ... }
+
     if (record.username) return String(record.username);
-    
-    // Fallback: any field whose key mentions "discord"
+
     const key = Object.keys(record).find(k => k.toLowerCase().includes('discord'));
     if (key && record[key]) {
         return String(record[key]);
     }
-    
+
     return null;
 }
 
-async function lookupDiscordUsername(robloxUsername) {
-    if (!NEXUS_ADMIN_KEY) {
-        console.log(`  ⚠️ NEXUS_ADMIN_KEY not set, skipping Discord lookup`);
-        return null;
-    }
-    
+async function lookupDiscordAndSend(robloxUsername, rolimonsData) {
     try {
         const response = await axios.get(NEXUS_API_URL, {
             params: { query: robloxUsername },
-            headers: { 'x-admin-key': NEXUS_ADMIN_KEY }
+            headers: {
+                'x-access-key': NEXUS_ACCESS_KEY
+            }
         });
-        
+
         const body = response.data || {};
         const records = Array.isArray(body.data) ? body.data : [];
-        
+
         if (!records.length) {
-            console.log(`  ℹ️ No Discord found for ${robloxUsername}`);
-            return null;
+            console.log(`ℹ️ No Discord found for ${robloxUsername} (Nexus API returned empty data[])`);
+            return false;
         }
-        
+
         const discordRecord = records[0];
         const discordValue = extractDiscordFromRecord(discordRecord);
-        
+
         if (!discordValue) {
-            console.log(`  ℹ️ Could not extract Discord from Nexus response for ${robloxUsername}`);
-            return null;
+            console.log(`ℹ️ Could not extract Discord field from Nexus API response for ${robloxUsername}`);
+            return false;
         }
-        
-        console.log(`  🎮 Discord found: ${discordValue}`);
-        return discordValue;
-        
+
+        await sendToWebhook(robloxUsername, discordValue, discordRecord, rolimonsData);
+        await sendUsernameOnlyToWebhook(discordValue);
+        return true;
     } catch (error) {
-        console.error(`  ❌ Nexus API error for ${robloxUsername}:`, error.message);
-        return null;
+        console.error(`❌ Nexus API error for ${robloxUsername}:`, error.message);
+        return false;
     }
 }
 
-async function sendToWebhook(userData) {
-    console.log(`📤 Sending embed to webhook: ${userData.username}`);
+async function sendToWebhook(robloxUsername, discordUsername, discordRecord, rolimonsData) {
+    console.log(`📤 sendToWebhook called: Roblox=${robloxUsername}, Discord=${discordUsername}`);
     try {
+        const fields = [];
+        
+        fields.push({ 
+            name: "Discord Username", 
+            value: discordUsername, 
+            inline: false 
+        });
+        
+        if (discordRecord && discordRecord.user_id) {
+            fields.push({ 
+                name: "Discord ID", 
+                value: discordRecord.user_id.toString(), 
+                inline: true 
+            });
+        } else if (discordRecord && discordRecord.id) {
+            fields.push({ 
+                name: "Discord ID", 
+                value: discordRecord.id.toString(), 
+                inline: true 
+            });
+        }
+        
+        fields.push({ 
+            name: "Roblox Username", 
+            value: robloxUsername, 
+            inline: true 
+        });
+        
+        if (rolimonsData && rolimonsData.value) {
+            fields.push({ 
+                name: "Value", 
+                value: rolimonsData.value.toLocaleString(), 
+                inline: true 
+            });
+        }
+        
+        if (rolimonsData && rolimonsData.tradeAds !== undefined) {
+            fields.push({ 
+                name: "Trade Ads", 
+                value: rolimonsData.tradeAds.toString(), 
+                inline: true 
+            });
+        }
+        
         const embed = {
-            title: "✨ New Profile Found!",
+            title: "✨ New Discord Found!",
             color: 0x00AE86,
-            fields: [
-                {
-                    name: "Discord Username",
-                    value: userData.discord || " ",
-                    inline: false
-                },
-                {
-                    name: "Roblox Username",
-                    value: userData.username,
-                    inline: true
-                },
-                {
-                    name: "Rolimons Profile",
-                    value: `[View Profile](${userData.profileUrl})`,
-                    inline: false
-                }
-            ],
+            fields: fields,
             timestamp: new Date().toISOString()
         };
         
-        // Add avatar thumbnail if available
-        if (userData.avatarUrl) {
-            embed.thumbnail = { url: userData.avatarUrl };
+        if (rolimonsData && rolimonsData.avatarUrl) {
+            embed.thumbnail = {
+                url: rolimonsData.avatarUrl
+            };
         }
         
-        const payload = { embeds: [embed] };
+        if (rolimonsData && rolimonsData.profileUrl) {
+            fields.push({
+                name: "Rolimons Profile",
+                value: `[View Profile](${rolimonsData.profileUrl})`,
+                inline: false
+            });
+        }
         
+        const payload = {
+            embeds: [embed]
+        };
+        
+        console.log('Sending webhook: new Discord found...');
         const response = await axios.post(WEBHOOK_URL, payload);
         console.log('✅ Webhook sent successfully, status:', response.status);
-        
-        // Send Discord username only to the username webhook (if Discord was found)
-        if (userData.discord) {
-            await sendUsernameToWebhook(userData.discord);
-        }
-        
-        return true;
     } catch (e) {
         console.error('❌ Webhook POST error:', e.message);
         if (e.response) {
             console.error('Response status:', e.response.status);
+            console.error('Response data:', e.response.data);
         }
-        return false;
     }
 }
 
-async function sendUsernameToWebhook(discordUsername) {
+async function sendUsernameOnlyToWebhook(discordUsername) {
+    console.log(`📤 Sending Discord username only to username webhook: ${discordUsername}`);
     try {
-        const payload = { content: discordUsername };
+        const payload = {
+            content: discordUsername
+        };
+        
         const response = await axios.post(USERNAME_WEBHOOK_URL, payload);
-        console.log('✅ Username webhook sent, status:', response.status);
-        return true;
+        console.log('✅ Username-only webhook sent successfully, status:', response.status);
     } catch (e) {
-        console.error('❌ Username webhook error:', e.message);
-        return false;
-    }
-}
-
-async function checkUserHasAvatar(profileUrl) {
-    try {
-        await driver.get(profileUrl);
-        await driver.sleep(PROFILE_CHECK_WAIT);
-
-        // Try to find the avatar image element specifically
-        // Rolimons uses img with class containing avatar or specific container
-        const avatarSelectors = [
-            'img.mx-auto.d-block.w-100.h-100',
-            'img[src*="rbxcdn.com"]',
-            '.player-avatar img',
-            '#player_avatar img'
-        ];
-        
-        for (const selector of avatarSelectors) {
-            try {
-                const avatarImg = await driver.findElement(By.css(selector));
-                const src = await avatarImg.getAttribute('src');
-                
-                if (src) {
-                    // Check if it's the terminated placeholder
-                    if (src.includes('transparent-square') || src.includes('placeholder')) {
-                        console.log(`  ❌ TERMINATED (placeholder avatar)`);
-                        return { valid: false, avatarUrl: null };
-                    }
-                    
-                    // Check if it's a valid rbxcdn avatar
-                    if (src.includes('rbxcdn.com')) {
-                        console.log(`  ✅ Valid: ${src.substring(0, 50)}...`);
-                        return { valid: true, avatarUrl: src };
-                    }
-                }
-            } catch (e) {
-                // Selector not found, try next
-                continue;
-            }
-        }
-        
-        // Fallback: check page source for avatar patterns
-        const pageSource = await driver.getPageSource();
-        
-        // Look for valid rbxcdn avatar URL first (prioritize finding valid)
-        const avatarMatch = pageSource.match(/https:\/\/tr\.rbxcdn\.com\/[^"'\s]+Avatar[^"'\s]*/i);
-        if (avatarMatch) {
-            const avatarUrl = avatarMatch[0];
-            console.log(`  ✅ Valid (source): ${avatarUrl.substring(0, 50)}...`);
-            return { valid: true, avatarUrl: avatarUrl };
-        }
-        
-        // Check for any rbxcdn image
-        const rbxcdnMatch = pageSource.match(/https:\/\/tr\.rbxcdn\.com\/[^"'\s]+/i);
-        if (rbxcdnMatch) {
-            const avatarUrl = rbxcdnMatch[0];
-            console.log(`  ✅ Valid (rbxcdn): ${avatarUrl.substring(0, 50)}...`);
-            return { valid: true, avatarUrl: avatarUrl };
-        }
-        
-        // Only mark as terminated if we explicitly find the placeholder AND no valid avatar
-        // Check if terminated placeholder exists in a specific context
-        if (pageSource.includes('transparent-square-110.png') && !pageSource.includes('tr.rbxcdn.com')) {
-            console.log(`  ❌ TERMINATED (no valid avatar found)`);
-            return { valid: false, avatarUrl: null };
-        }
-        
-        // Default: assume valid if we can't determine
-        console.log(`  ⚠️ Could not determine avatar status, assuming valid`);
-        return { valid: true, avatarUrl: null };
-        
-    } catch (error) {
-        console.error('  ⚠️ Error checking avatar:', error.message);
-        return { valid: true, avatarUrl: null };
-    }
-}
-
-async function findPreviousOwnerFromUAID(uaidUrl) {
-    try {
-        await driver.get(uaidUrl);
-        await driver.sleep(PAGE_LOAD_WAIT);
-
-        // Find the FIRST valid player link (most recent previous owner)
-        let firstOwner = null;
-        
-        try {
-            const playerLinks = await driver.findElements(By.css('a[href*="/player/"]'));
-            
-            for (const link of playerLinks) {
-                try {
-                    const href = await link.getAttribute('href');
-                    const text = await link.getText();
-                    
-                    if (!text || !text.trim()) continue;
-                    if (text.includes('Deleted') || text.includes('Hidden')) continue;
-                    
-                    const username = text.trim();
-                    let profileUrl = href;
-                    if (!profileUrl.startsWith('http')) {
-                        profileUrl = `https://www.rolimons.com${href}`;
-                    }
-                    
-                    // Found the first user - stop looking
-                    firstOwner = { username, profileUrl };
-                    break;
-                } catch (e) {
-                    continue;
-                }
-            }
-        } catch (e) {}
-
-        // If no user found at all, return null
-        if (!firstOwner) {
-            console.log(`  ⚠️ No previous owner found on UAID page`);
-            return null;
-        }
-
-        console.log(`  👤 First previous owner: ${firstOwner.username}`);
-        
-        // Check ONLY the first owner - if terminated, skip this UAID entirely
-        const avatarCheck = await checkUserHasAvatar(firstOwner.profileUrl);
-        
-        if (avatarCheck.valid) {
-            return {
-                username: firstOwner.username,
-                profileUrl: firstOwner.profileUrl,
-                avatarUrl: avatarCheck.avatarUrl,
-                discord: ""
-            };
-        } else {
-            // First owner is terminated - skip this UAID
-            console.log(`  ⏭️ First owner ${firstOwner.username} is terminated, skipping UAID`);
-            return null;
-        }
-        
-    } catch (error) {
-        return null;
-    }
-}
-
-async function navigateToItemPage(url) {
-    await driver.get(url);
-    await driver.sleep(PAGE_LOAD_WAIT);
-    
-    // Click "All Copies" tab
-    const allCopiesTab = await driver.findElement(By.css('a[href="#all_copies_table_container"]'));
-    await driver.executeScript('arguments[0].click();', allCopiesTab);
-    await driver.sleep(TABLE_WAIT);
-    await driver.wait(until.elementLocated(By.css('#all_copies_table tbody tr')), 15000);
-}
-
-async function navigateToPage(targetPage, totalPages) {
-    // Click to specific page - first try direct click, then use pagination
-    try {
-        const pageBtn = await driver.findElement(By.xpath(`//a[contains(@class, 'page-link') and text()='${targetPage}']`));
-        await driver.executeScript('arguments[0].click();', pageBtn);
-        await driver.sleep(TABLE_WAIT);
-        return true;
-    } catch (e) {
-        // Page button not visible, need to navigate using next/prev
-        // Go to last page first, then work backwards
-        try {
-            const lastPageBtn = await driver.findElement(By.xpath(`//a[contains(@class, 'page-link') and text()='${totalPages}']`));
-            await driver.executeScript('arguments[0].click();', lastPageBtn);
-            await driver.sleep(TABLE_WAIT);
-            
-            // Click prev until we reach target
-            for (let p = totalPages; p > targetPage; p--) {
-                const prevLink = await driver.findElement(By.css('#all_copies_table_paginate a.page-link[data-dt-idx="0"]'));
-                await driver.executeScript('arguments[0].click();', prevLink);
-                await driver.sleep(TABLE_WAIT);
-            }
-            return true;
-        } catch (e2) {
-            return false;
+        console.error('❌ Username-only webhook POST error:', e.message);
+        if (e.response) {
+            console.error('Response status:', e.response.status);
+            console.error('Response data:', e.response.data);
         }
     }
 }
 
-async function collectUAIDsFromCurrentPage() {
-    let uaids = [];
-    const rows = await driver.findElements(By.css('#all_copies_table tbody tr'));
+async function cleanup() {
+    console.log('🧹 Cleaning up resources...');
     
-    for (let i = rows.length - 1; i >= 0; i--) {
-        try {
-            const row = rows[i];
-            
-            // Check if deleted/hidden (no player link)
-            let hasPlayerLink = false;
-            try {
-                const playerLink = await row.findElement(By.css('a[href*="/player/"]'));
-                const playerText = await playerLink.getText();
-                if (playerText && playerText.trim() && !playerText.includes('Deleted') && !playerText.includes('Hidden')) {
-                    hasPlayerLink = true;
-                }
-            } catch (e) {
-                hasPlayerLink = false;
-            }
-
-            if (!hasPlayerLink) {
-                try {
-                    const uaidElement = await row.findElement(By.css('a[href*="/uaid/"]'));
-                    const uaidHref = await uaidElement.getAttribute('href');
-                    const uaidText = await uaidElement.getText();
-                    
-                    let uaidUrl = uaidHref;
-                    if (!uaidUrl.startsWith('http')) {
-                        uaidUrl = `https://www.rolimons.com${uaidHref}`;
-                    }
-                    
-                    if (!processedUAIDs.has(uaidText)) {
-                        uaids.push({ uaid: uaidText, url: uaidUrl });
-                        processedUAIDs.add(uaidText);
-                    }
-                } catch (e) {}
-            }
-        } catch (e) {}
-    }
-    
-    return uaids;
-}
-
-async function scrapeItemForDeletedUsers(itemId) {
-    try {
-        const url = `https://www.rolimons.com/item/${itemId}`;
-        console.log(`\n🔍 Scraping item: ${url}`);
-        
-        await driver.get(url);
-        await driver.sleep(PAGE_LOAD_WAIT);
-
-        // Get item name
-        let itemName = 'Unknown Item';
-        try {
-            const titleElement = await driver.findElement(By.css('h1.page_title.mb-0'));
-            itemName = await titleElement.getText();
-            console.log(`📦 Item: ${itemName}`);
-        } catch (e) {}
-
-        // Click "All Copies" tab
-        try {
-            const allCopiesTab = await driver.findElement(By.css('a[href="#all_copies_table_container"]'));
-            await driver.executeScript('arguments[0].click();', allCopiesTab);
-            await driver.sleep(TABLE_WAIT);
-            await driver.wait(until.elementLocated(By.css('#all_copies_table tbody tr')), 15000);
-        } catch (e) {
-            console.log('❌ Could not load All Copies table:', e.message);
-            return;
-        }
-
-        // Find total pages
-        let totalPages = 1;
-        try {
-            await driver.wait(until.elementLocated(By.css('#all_copies_table_paginate')), 10000);
-            const pageButtons = await driver.findElements(By.css('#all_copies_table_paginate a.page-link[data-dt-idx]'));
-            
-            for (const button of pageButtons) {
-                const text = (await button.getText()).trim();
-                if (/^\d+$/.test(text)) {
-                    const pageNum = parseInt(text, 10);
-                    if (pageNum > totalPages) totalPages = pageNum;
-                }
-            }
-        } catch (e) {}
-        
-        console.log(`📄 Found ${totalPages} pages (processing ${PAGES_PER_BATCH} at a time)`);
-
-        // Process in batches of PAGES_PER_BATCH pages
-        let currentPage = totalPages;
-        let batchNum = 0;
-        
-        while (currentPage >= 1) {
-            batchNum++;
-            const batchEnd = currentPage;
-            const batchStart = Math.max(1, currentPage - PAGES_PER_BATCH + 1);
-            
-            console.log(`\n📦 Batch ${batchNum}: Pages ${batchEnd} → ${batchStart}`);
-            
-            // Navigate to starting page of this batch
-            await navigateToItemPage(url);
-            if (batchEnd > 1) {
-                await navigateToPage(batchEnd, totalPages);
-            }
-            
-            // Collect UAIDs from this batch of pages
-            let batchUAIDs = [];
-            
-            for (let page = batchEnd; page >= batchStart; page--) {
-                if (page !== batchEnd) {
-                    try {
-                        const prevLink = await driver.findElement(By.css('#all_copies_table_paginate a.page-link[data-dt-idx="0"]'));
-                        await driver.executeScript('arguments[0].click();', prevLink);
-                        await driver.sleep(TABLE_WAIT);
-                    } catch (e) {
-                        break;
-                    }
-                }
-                
-                const pageUAIDs = await collectUAIDsFromCurrentPage();
-                batchUAIDs.push(...pageUAIDs);
-                console.log(`  Page ${page}: ${pageUAIDs.length} UAIDs (batch total: ${batchUAIDs.length})`);
-            }
-            
-            // Process this batch
-            if (batchUAIDs.length > 0) {
-                console.log(`\n⚡ Processing ${batchUAIDs.length} UAIDs from batch ${batchNum}...`);
-                
-                for (let i = 0; i < batchUAIDs.length; i++) {
-                    const { uaid, url: uaidUrl } = batchUAIDs[i];
-                    console.log(`[${i + 1}/${batchUAIDs.length}] UAID: ${uaid}`);
-                    
-                    const userData = await findPreviousOwnerFromUAID(uaidUrl);
-                    
-                    if (userData) {
-                        console.log(`  ✨ Found: ${userData.username}`);
-                        
-                        // Lookup Discord username via Nexus API
-                        const discordUsername = await lookupDiscordUsername(userData.username);
-                        
-                        // Only send embed if Discord was found
-                        if (discordUsername) {
-                            userData.discord = discordUsername;
-                            await sendToWebhook(userData);
-                            totalFound++;
-                        } else {
-                            console.log(`  ⏭️ Skipping ${userData.username} - no Discord found`);
-                        }
-                    } else {
-                        console.log(`  ❌ No valid owner`);
-                    }
-                }
-            } else {
-                console.log(`  No deleted/hidden users in this batch`);
-            }
-            
-            // Move to next batch
-            currentPage = batchStart - 1;
-        }
-        
-        console.log(`\n✅ Finished item ${itemId}. Total found: ${totalFound}`);
-        
-    } catch (error) {
-        console.error('❌ Error scraping item:', error.message);
-    }
-}
-
-async function main() {
-    console.log('🚀 UAID Previous Owner Scraper');
-    console.log('================================');
-    console.log('This script finds Deleted/Hidden users and looks up their previous owners.\n');
-    
-    // Check configurations
-    if (NEXUS_ADMIN_KEY) {
-        console.log('✅ Nexus API configured - Discord lookups enabled');
-    } else {
-        console.log('⚠️ NEXUS_ADMIN_KEY not set - Discord lookups disabled');
-    }
-    
-    if (USER_TOKEN) {
-        console.log('✅ Discord bot configured - Commands enabled');
-        console.log(`   Command channel: ${COMMAND_CHANNEL_ID}`);
-        console.log(`   Monitor channel: ${MONITOR_CHANNEL_ID}`);
-    } else {
-        console.log('⚠️ USER_TOKEN not set - Discord commands disabled');
-    }
-    console.log('');
-    
-    const initialized = await initializeWebDriver();
-    if (!initialized) {
-        console.error('❌ Failed to initialize WebDriver');
-        process.exit(1);
-    }
-
-    const itemIds = ITEM_IDS.split(',').map(id => id.trim()).filter(id => id && !isNaN(id));
-    console.log(`📋 Will scrape ${itemIds.length} items: ${itemIds.join(', ')}\n`);
-
-    isScraping = true;
-    
-    for (const itemId of itemIds) {
-        await scrapeItemForDeletedUsers(itemId);
-    }
-
-    isScraping = false;
-    console.log('\n================================');
-    console.log(`🏁 All done! Total previous owners found: ${totalFound}`);
-    
-    await driver.quit();
-    console.log('✅ Scraping complete. Server still running for health checks.');
-}
-
-// Handle cleanup
-process.on('SIGINT', async () => {
-    console.log('\n🧹 Cleaning up...');
     if (driver) {
-        try { await driver.quit(); } catch (e) {}
+        try {
+            await driver.quit();
+            console.log('✅ Main driver closed');
+        } catch (e) {
+            console.log('Error closing main driver:', e.message);
+        }
+    }
+    
+    if (profileDriver) {
+        try {
+            await profileDriver.quit();
+            console.log('✅ Profile driver closed');
+        } catch (e) {
+            console.log('Error closing profile driver:', e.message);
+        }
     }
     process.exit(0);
+}
+
+process.on('SIGINT', cleanup);
+
+process.on('uncaughtException', async (error) => {
+    console.error('Uncaught Exception:', error);
+    await cleanup();
 });
+process.on('unhandledRejection', (e) => console.error('❌ Unhandled promise rejection:', e));
+
+// Validate required environment variables
+if (!WEBHOOK_URL) {
+    console.error('❌ WEBHOOK_URL environment variable is required');
+    process.exit(1);
+}
+if (!USERNAME_WEBHOOK_URL) {
+    console.error('❌ USERNAME_WEBHOOK_URL environment variable is required');
+    process.exit(1);
+}
+if (!NEXUS_ACCESS_KEY) {
+    console.error('❌ NEXUS_ACCESS_KEY environment variable is required');
+    process.exit(1);
+}
+
+// Railway deployment logging
+console.log('🚀 Starting Railway deployment...');
+console.log('📋 Configuration:');
+console.log(`   - Webhook URL: ${WEBHOOK_URL.substring(0, 50)}...`);
+console.log(`   - Username Webhook URL: ${USERNAME_WEBHOOK_URL.substring(0, 50)}...`);
+console.log(`   - Item IDs: ${ITEM_IDS}`);
 
 // Start Discord bot login
 if (USER_TOKEN && discordClient) {
     discordClient.login(USER_TOKEN).catch((e) => {
-        console.error('❌ Failed to login to Discord:', e.message);
+        console.error('❌ Failed to login to Discord:', e);
         console.log('ℹ️ Discord bot functionality disabled. Scraper will continue without Discord commands.');
+        discordClient = null;
     });
+} else {
+    if (!USER_TOKEN) {
+        console.log('ℹ️ USER_TOKEN not set. Discord bot functionality disabled.');
+    }
 }
 
-main();
+startScraper();
