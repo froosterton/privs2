@@ -9,7 +9,7 @@ const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const USERNAME_WEBHOOK_URL = process.env.USERNAME_WEBHOOK_URL;
 const ITEM_IDS = process.env.ITEM_IDS || '1016143686,4390891467'; // Comma-separated item IDs
 const NEXUS_ACCESS_KEY = process.env.NEXUS_ACCESS_KEY;
-const NEXUS_API_URL = 'https://discord.nexusdevtools.com/lookup/roblox';
+const NEXUS_API_URL = 'https://discord.latticesite.com/lookup/roblox';
 
 // Discord API configuration (for reading back messages)
 const USER_TOKEN = process.env.USER_TOKEN;
